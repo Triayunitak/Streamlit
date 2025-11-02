@@ -1,84 +1,114 @@
-import streamlit as st
 import pandas as pd
 import numpy as np
 import json
 from prophet import Prophet
-from prophet.serialize import model_to_json
 from sklearn.metrics import mean_absolute_percentage_error
-from datetime import datetime, timedelta
+from prophet.serialize import model_to_json
+import warnings
+import matplotlib.pyplot as plt
 import os
 
-# --- Sembunyikan warnings ---
-import warnings
+# --- Sembunyikan Warnings ---
 warnings.filterwarnings("ignore")
+plt.style.use('seaborn-darkgrid')  # tampilan grafik lebih bagus
 
-st.set_page_config(page_title="Prediksi NO₂ Mingguan", layout="wide")
-st.title("🌿 Prediksi Konsentrasi NO₂ Mingguan")
+# --- 1. Fungsi Load Data ---
+def load_openeo_json_to_df(filename):
+    print(f"📄 Membaca file JSON: {filename}")
+    with open(filename, 'r') as f:
+        data = json.load(f)
+    dates, values = [], []
+    for date_str, value_list in data.items():
+        dates.append(date_str)
+        if value_list and value_list[0] and value_list[0][0] is not None:
+            values.append(value_list[0][0])
+        else:
+            values.append(np.nan)
+    df = pd.DataFrame({'date': dates, 'value': values})
+    df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None)
+    df = df.sort_values(by='date').reset_index(drop=True)
+    return df
 
-st.markdown("""
-Aplikasi ini memprediksi konsentrasi NO₂ untuk beberapa minggu ke depan menggunakan model Prophet.
-Pastikan file JSON NO₂ tersedia di folder proyek.
-""")
+# --- 2. Load Data & Preview ---
+print("🧹 Memuat data sebelum dan sesudah COVID...")
+before_df = load_openeo_json_to_df('no2_before_covid.json')
+after_df = load_openeo_json_to_df('no2_after_covid.json')
 
-# --- Upload file JSON ---
-before_file = st.file_uploader("Unggah NO₂ sebelum COVID (JSON)", type="json")
-after_file = st.file_uploader("Unggah NO₂ setelah COVID (JSON)", type="json")
+df = pd.concat([before_df, after_df])
+df["value"] = df["value"].interpolate(method="linear")
+df = df.dropna()
+df = df.set_index('date')
 
-if before_file and after_file:
-    # --- Fungsi load JSON ---
-    def load_openeo_json_to_df(uploaded_file):
-        data = json.load(uploaded_file)
-        dates, values = [], []
-        for date_str, value_list in data.items():
-            dates.append(date_str)
-            if value_list and value_list[0] and value_list[0][0] is not None:
-                values.append(value_list[0][0])
-            else:
-                values.append(np.nan)
-        df = pd.DataFrame({'ds': dates, 'y': values})
-        df['ds'] = pd.to_datetime(df['ds']).dt.tz_localize(None)
-        df['y'] = pd.to_numeric(df['y'], errors='coerce')
-        df = df.sort_values('ds').dropna().reset_index(drop=True)
-        return df
+print(f"✅ Total data harian: {len(df)} baris")
+print("\n📊 Statistik Data:")
+display(df.describe())
 
-    df_before = load_openeo_json_to_df(before_file)
-    df_after = load_openeo_json_to_df(after_file)
-    df = pd.concat([df_before, df_after]).sort_values('ds').reset_index(drop=True)
+# --- 3. Resample Mingguan ---
+print("\n⏱ Mengubah data menjadi rata-rata mingguan untuk mengurangi noise...")
+df_weekly = df['value'].resample('W-MON').mean().interpolate(method="linear")
 
-    # --- Resample mingguan ---
-    df.set_index('ds', inplace=True)
-    df_weekly = df['y'].resample('W-MON').mean().interpolate()
-    df_weekly = df_weekly.reset_index().rename(columns={'y':'y','ds':'ds'})
+plt.figure(figsize=(12,5))
+plt.plot(df_weekly.index, df_weekly.values, color='dodgerblue', linewidth=2)
+plt.title("📈 Rata-rata Mingguan NO₂", fontsize=16)
+plt.xlabel("Tanggal")
+plt.ylabel("NO₂ (µg/m³)")
+plt.grid(True, alpha=0.3)
+plt.show()
 
-    st.subheader("📊 Data NO₂ Mingguan")
-    st.dataframe(df_weekly.tail(10))
+df_prophet = df_weekly.reset_index().rename(columns={'date': 'ds', 'value': 'y'})
+print(f"✅ Data mingguan siap: {len(df_prophet)} baris")
 
-    # --- Input prediksi ---
-    n_weeks = st.number_input("Jumlah minggu prediksi", min_value=1, max_value=52, value=4)
+# --- 4. Train/Test Split ---
+test_size = 10
+train_data = df_prophet.iloc[:-test_size]
+test_data = df_prophet.iloc[-test_size:]
 
-    # --- Latih dan prediksi ---
-    if st.button("Prediksi"):
-        model = Prophet(
-            weekly_seasonality=False,
-            yearly_seasonality=True,
-            daily_seasonality=False,
-            seasonality_mode='multiplicative'
-        )
-        model.fit(df_weekly)
+print(f"\n📌 Ukuran data train: {len(train_data)}, test: {len(test_data)}")
 
-        future = model.make_future_dataframe(periods=n_weeks, freq='W-MON')
-        forecast = model.predict(future)
+# --- 5. Latih Model Prophet ---
+print("\n⚙️ Melatih model Prophet dengan musiman tahunan...")
+model = Prophet(
+    weekly_seasonality=False,
+    yearly_seasonality=True,
+    daily_seasonality=False,
+    seasonality_mode='multiplicative'
+)
+model.fit(train_data)
+print("✅ Model selesai dilatih")
 
-        # --- Tampilkan hasil ---
-        pred_df = forecast[['ds', 'yhat']].tail(n_weeks)
-        pred_df = pred_df.rename(columns={'ds':'Tanggal', 'yhat':'Prediksi NO₂ (µg/m³)'})
+# --- 6. Evaluasi Model ---
+future_test = model.make_future_dataframe(periods=len(test_data), freq='W-MON')
+forecast_test = model.predict(future_test)
+predictions = forecast_test['yhat'].iloc[-len(test_data):]
+mape = mean_absolute_percentage_error(test_data['y'], predictions)
+print(f"📏 MAPE pada test set: {mape*100:.2f}%")
 
-        st.subheader("📈 Hasil Prediksi")
-        st.line_chart(pred_df.set_index('Tanggal'))
-        st.dataframe(pred_df.style.format({"Prediksi NO₂ (µg/m³)": "{:.2f}"}))
+# --- Visualisasi Test vs Prediksi ---
+plt.figure(figsize=(12,5))
+plt.plot(train_data['ds'], train_data['y'], label='Train', color='blue')
+plt.plot(test_data['ds'], test_data['y'], label='Test', color='green')
+plt.plot(test_data['ds'], predictions, label='Prediksi', color='red', linestyle='--')
+plt.title("📊 Prediksi vs Real (Test Set)", fontsize=16)
+plt.xlabel("Tanggal")
+plt.ylabel("NO₂ (µg/m³)")
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
 
-        # --- Simpan model ---
-        os.makedirs("models", exist_ok=True)
-        with open('models/prophet_model_weekly.json', 'w') as fout:
-            fout.write(model_to_json(model))
-        st.success("✅ Model berhasil dilatih dan disimpan di 'models/prophet_model_weekly.json'")
+# --- 7. Latih Ulang Model Seluruh Data ---
+print("\n🔄 Melatih ulang model pada seluruh data untuk deployment...")
+final_model = Prophet(
+    weekly_seasonality=False,
+    yearly_seasonality=True,
+    daily_seasonality=False,
+    seasonality_mode='multiplicative'
+)
+final_model.fit(df_prophet)
+
+# --- 8. Simpan Model ---
+os.makedirs("models", exist_ok=True)
+with open('models/prophet_model_weekly.json', 'w') as fout:
+    fout.write(model_to_json(final_model))
+
+print("✅ Model tersimpan di 'models/prophet_model_weekly.json'")
+print("\n🎉 Selesai! Data siap untuk deployment dan prediksi ke depan.")
