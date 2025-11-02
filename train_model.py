@@ -6,11 +6,9 @@ from sklearn.metrics import mean_absolute_percentage_error
 from prophet.serialize import model_to_json
 import warnings
 import matplotlib.pyplot as plt
-import os
 
-# --- Sembunyikan Warnings ---
+# --- Sembunyikan warnings ---
 warnings.filterwarnings("ignore")
-plt.style.use('seaborn-darkgrid')  # tampilan grafik lebih bagus
 
 # --- 1. Fungsi Load Data ---
 def load_openeo_json_to_df(filename):
@@ -29,8 +27,8 @@ def load_openeo_json_to_df(filename):
     df = df.sort_values(by='date').reset_index(drop=True)
     return df
 
-# --- 2. Load Data & Preview ---
-print("🧹 Memuat data sebelum dan sesudah COVID...")
+# --- 2. Load & Siapkan Data ---
+print("🧹 Memuat dan membersihkan data...")
 before_df = load_openeo_json_to_df('no2_before_covid.json')
 after_df = load_openeo_json_to_df('no2_after_covid.json')
 
@@ -39,20 +37,13 @@ df["value"] = df["value"].interpolate(method="linear")
 df = df.dropna()
 df = df.set_index('date')
 
-print(f"✅ Total data harian: {len(df)} baris")
-print("\n📊 Statistik Data:")
-display(df.describe())
+print(f"✅ Data siap: {len(df)} baris data harian")
 
 # --- 3. Resample Mingguan ---
-print("\n⏱ Mengubah data menjadi rata-rata mingguan untuk mengurangi noise...")
-df_weekly = df['value'].resample('W-MON').mean().interpolate(method="linear")
-
-plt.figure(figsize=(12,5))
-plt.plot(df_weekly.index, df_weekly.values, color='dodgerblue', linewidth=2)
-plt.title("📈 Rata-rata Mingguan NO₂", fontsize=16)
-plt.xlabel("Tanggal")
-plt.ylabel("NO₂ (µg/m³)")
-plt.grid(True, alpha=0.3)
+print("📊 Resample ke data mingguan untuk mengurangi noise...")
+df_weekly = df['value'].resample('W-MON').mean()
+df_weekly = df_weekly.interpolate(method="linear")
+df_weekly.plot(title="Rata-rata Mingguan NO₂", figsize=(12,4))
 plt.show()
 
 df_prophet = df_weekly.reset_index().rename(columns={'date': 'ds', 'value': 'y'})
@@ -63,10 +54,11 @@ test_size = 10
 train_data = df_prophet.iloc[:-test_size]
 test_data = df_prophet.iloc[-test_size:]
 
-print(f"\n📌 Ukuran data train: {len(train_data)}, test: {len(test_data)}")
+print(f"📌 Ukuran data training: {len(train_data)}")
+print(f"📌 Ukuran data testing: {len(test_data)}")
 
 # --- 5. Latih Model Prophet ---
-print("\n⚙️ Melatih model Prophet dengan musiman tahunan...")
+print("⚙️ Melatih model Prophet...")
 model = Prophet(
     weekly_seasonality=False,
     yearly_seasonality=True,
@@ -79,24 +71,23 @@ print("✅ Model selesai dilatih")
 # --- 6. Evaluasi Model ---
 future_test = model.make_future_dataframe(periods=len(test_data), freq='W-MON')
 forecast_test = model.predict(future_test)
+
 predictions = forecast_test['yhat'].iloc[-len(test_data):]
 mape = mean_absolute_percentage_error(test_data['y'], predictions)
-print(f"📏 MAPE pada test set: {mape*100:.2f}%")
+print(f"📏 MAPE: {mape*100:.2f}%")
 
 # --- Visualisasi Test vs Prediksi ---
 plt.figure(figsize=(12,5))
 plt.plot(train_data['ds'], train_data['y'], label='Train', color='blue')
 plt.plot(test_data['ds'], test_data['y'], label='Test', color='green')
 plt.plot(test_data['ds'], predictions, label='Prediksi', color='red', linestyle='--')
-plt.title("📊 Prediksi vs Real (Test Set)", fontsize=16)
+plt.title("Prediksi vs Real (Test Set)")
 plt.xlabel("Tanggal")
 plt.ylabel("NO₂ (µg/m³)")
 plt.legend()
-plt.grid(True, alpha=0.3)
 plt.show()
 
 # --- 7. Latih Ulang Model Seluruh Data ---
-print("\n🔄 Melatih ulang model pada seluruh data untuk deployment...")
 final_model = Prophet(
     weekly_seasonality=False,
     yearly_seasonality=True,
@@ -111,4 +102,3 @@ with open('models/prophet_model_weekly.json', 'w') as fout:
     fout.write(model_to_json(final_model))
 
 print("✅ Model tersimpan di 'models/prophet_model_weekly.json'")
-print("\n🎉 Selesai! Data siap untuk deployment dan prediksi ke depan.")
